@@ -24,31 +24,38 @@ export async function streamCheck(
   let buf = "";
   let finalResult: CheckResult | null = null;
 
+  // Event delimiter: SSE allows either LF-LF or CRLF-CRLF. sse_starlette on
+  // the backend emits CRLF-CRLF, which an LF-only parser silently drops.
+  const flushDelimited = () => {
+    while (true) {
+      const match = buf.match(/\r?\n\r?\n/);
+      if (!match || match.index === undefined) break;
+      const chunk = buf.slice(0, match.index);
+      buf = buf.slice(match.index + match[0].length);
+      const ev = parseSSE(chunk);
+      if (!ev) continue;
+      onEvent(ev);
+      if (ev.name === "result") {
+        finalResult = ev.payload as unknown as CheckResult;
+      }
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) !== -1) {
-      const chunk = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const ev = parseSSE(chunk);
-      if (ev) {
-        onEvent(ev);
-        if (ev.name === "result") {
-          finalResult = ev.payload as unknown as CheckResult;
-        }
-      }
-    }
+    flushDelimited();
   }
+  buf += decoder.decode();
+  flushDelimited();
   return finalResult;
 }
 
 function parseSSE(raw: string): StreamEvent | null {
   let name = "message";
   const dataLines: string[] = [];
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split(/\r?\n/)) {
     if (line.startsWith("event:")) name = line.slice(6).trim();
     else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
   }
